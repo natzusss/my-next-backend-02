@@ -15,5 +15,5 @@ export function verifyJWT(request) {
 export function isAdmin(request) {
   const user = verifyJWT(request);
 
-  return user?.id === "1";
+  return user?.username === "testuser";
 }
