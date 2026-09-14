@@ -1,48 +1,119 @@
 import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
 import { NextResponse } from "next/server";
+import { getClientPromise } from "../../../../lib/mongodb";
 
 export async function POST(request) {
-  const { email, password } = await request.json();
+  let body;
 
-  if (!email || !password) {
+  try {
+    body = await request.json();
+  } catch {
     return NextResponse.json(
-      { message: "Missing email or password" },
+      { message: "Invalid JSON" },
       { status: 400 }
     );
   }
 
+  const { email, password } = body ?? {};
+
   if (
-    email !== process.env.ADMIN_USER ||
-    password !== process.env.ADMIN_PASS
+    typeof email !== "string" ||
+    typeof password !== "string" ||
+    !email.trim() ||
+    !password
   ) {
     return NextResponse.json(
-      { message: "Invalid email or password" },
+      { message: "Enter your username or email and password" },
+      { status: 400 }
+    );
+  }
+
+  const identifier = email.trim();
+
+  function invalidLogin() {
+    return NextResponse.json(
+      { message: "Invalid username or password" },
       { status: 401 }
     );
   }
 
-  const user = {
-    id: "1",
-    email,
-    username: "admin",
-  };
+  try {
+    let user;
 
-  const token = jwt.sign(user, process.env.JWT_SECRET, {
-    expiresIn: "7d",
-  });
+    if (identifier === process.env.ADMIN_USER) {
+      if (password !== process.env.ADMIN_PASS) {
+        return invalidLogin();
+      }
 
-  const response = NextResponse.json(
-    { message: "Login successful", user },
-    { status: 200 }
-  );
+      user = {
+        id: "1",
+        email: identifier,
+        username: "admin",
+      };
+    } else {
+      if (!process.env.DB_NAME) {
+        throw new Error("DB_NAME is not configured");
+      }
 
-  response.cookies.set("token", token, {
-    httpOnly: true,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-    secure: false,
-  });
+      const client = await getClientPromise();
+      const db = client.db(process.env.DB_NAME);
 
-  return response;
+      const account = await db.collection("user").findOne({
+        $or: [
+          { email: identifier },
+          { username: identifier },
+        ],
+      });
+
+      if (
+        !account ||
+        account.status !== "ACTIVE" ||
+        typeof account.password !== "string"
+      ) {
+        return invalidLogin();
+      }
+
+      const matches = await bcrypt.compare(
+        password,
+        account.password
+      );
+
+      if (!matches) {
+        return invalidLogin();
+      }
+
+      user = {
+        id: account._id.toString(),
+        email: account.email,
+        username: account.username,
+      };
+    }
+
+    const token = jwt.sign(user, process.env.JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    const response = NextResponse.json({
+      message: "Login successful",
+      user,
+    });
+
+    response.cookies.set("token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 7,
+      secure: process.env.NODE_ENV === "production",
+    });
+
+    return response;
+  } catch (error) {
+    console.error("Login failed:", error.name);
+
+    return NextResponse.json(
+      { message: "Unable to log in. Check backend configuration." },
+      { status: 500 }
+    );
+  }
 }
